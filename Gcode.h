@@ -80,6 +80,13 @@ struct point2D
 	float y;
 	double e;
 	int index;//在原gcode中的位置
+
+	//定义比较大小的函数
+	// < 表示从小到大的顺序
+	bool operator< (const point2D& other)
+	{
+		return x < other.x;
+	}
 };
 
 struct point3D
@@ -153,6 +160,9 @@ public:
 	void prepareOuterlines(Gcode currGcode, vector<point3D> &outputPoints, vector<int> &outContourIdx);
 	void prepareOuterLines(Gcode currGcode, vector<vector<point3D>> &outputPoints);
 	
+	//将wallinner用多边形的形式存储
+	void prepareModelPolygon(Gcode currGcode,vector<vector<vector<point2D>>> &modelPolygon);
+
 	vector<vector<vector<samplePoint2D>>> samplePoints;
 	
 	//对点进行平滑
@@ -163,6 +173,8 @@ public:
 	void outputLineObj(Gcode currGcode, string fileName);
 	void outputLineObj2(Gcode currGcode, string fileName);
 	void outputTextureFieldContours(string fileName);
+
+	void generateZvalue(Gcode &tmpGcode);
 
 };
 

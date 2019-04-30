@@ -9,6 +9,8 @@ string outputLinePath;
 string inputTextureField;
 
 float scanLineGap;
+float unitE;//单位长度对应的E
+float currE = 0;
 
 GlobalVariable::GlobalVariable()
 {

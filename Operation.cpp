@@ -37,11 +37,44 @@ void Operation::convertLine2G1(point2D sourcePos, point2D targetPos, eachLine & 
 
 }
 
+void Operation::convertContour2Gcode(vector<point2D> modelPolygon, vector<eachLine> &newWallinneer)
+{
+	//初始化
+	eachLine currLine;
+	currLine.codetype = WALL_INNER;
+	point2D currPoint, prePoint;
+
+	//用G1实现组成轮廓的各线段填充
+	for (int i = 0; i < modelPolygon.size(); i++)
+	{
+		currPoint = modelPolygon.at(i);
+
+		//对于轮廓的第一点做特殊处理
+		if (i == 0)
+		{
+			//先用G0移动到该轮廓
+			convertLine2G0(currPoint, currLine);
+		}
+		else
+		{
+			convertLine2G1(prePoint, currPoint, currLine);
+		}
+
+		prePoint = currPoint;
+		newWallinneer.push_back(currLine);
+	}
+
+	//当遍历完最后一个点之后，回到起点，使轮廓闭合
+	currPoint = modelPolygon.at(0);
+	convertLine2G1(prePoint, currPoint, currLine);
+	newWallinneer.push_back(currLine);
+}
+
 void Operation::convertContour2Gcode(vector<vector<point2D>> texturePolygon, vector<eachLine>& contourGcode)
 {
 	//初始化
 	eachLine currLine;
-	currLine.codetype = WALL_OUTER;
+	currLine.codetype = FILL;
 	point2D currPoint, prePoint;
 
 	//用G1实现组成轮廓的各线段填充
@@ -105,14 +138,16 @@ void Operation::convertInfillLine2Gcode(vector<vector<point2D>> intersectPoint, 
 
 void Operation::convertPoint_2ToPoint(Point_2 pIn, Point &pOut)
 {
-	pOut = Point(pIn.x(), pIn.y());
+	pOut = Point(pIn.bbox().xmin(), pIn.bbox().ymin());
 }
 
 void Operation::convertPoint_2ToPoint(vector<Point_2> pIn, vector<Point> &pOut)
 {
+	Point tmp;
 	for (int i = 0; i < pIn.size(); i++)
 	{
-		convertPoint_2ToPoint(pIn.at(i), pOut.at(i));
+		convertPoint_2ToPoint(pIn.at(i), tmp);
+		pOut.push_back(tmp);
 	}
 }
 
@@ -134,12 +169,41 @@ void Operation::convert2CGALpoint(vector<vector<point2D>> in, vector<vector<Poin
 			tmpOut.push_back(Point_2(in.at(i).at(j).x, in.at(i).at(j).y));
 		}
 		out.push_back(tmpOut);
+		tmpOut.clear();
 	}
 }
 
+void Operation::convertPoint_2Topoint2D(Point_2 in, point2D &out)
+{
+	out.x = in.bbox().xmin();
+	out.y = in.bbox().ymin();
+}
+
+void Operation::convertPoint_2Topoint2D(vector<Point_2> in, vector<point2D>& out)
+{
+	point2D tmp;
+	for (int i = 0; i < in.size(); i++)
+	{
+		convertPoint_2Topoint2D(in.at(i), tmp);
+		out.push_back(tmp);
+	}
+}
+
+void Operation::convertPoint_2Topoint2D(vector<vector<Point_2>> in, vector<vector<point2D>> &out)
+{
+	vector<point2D> tmp;
+	for (int i = 0; i < in.size(); i++)
+	{
+		convertPoint_2Topoint2D(in.at(i), tmp);
+		out.push_back(tmp);
+		tmp.clear();
+	}
+}
+
+
 bool Operation::checkPointInside(Point pt, vector<Point> polygon)
 {
-	switch (CGAL::bounded_side_2(polygon.at(0), polygon.at(polygon.size() - 1), pt, K())) \
+	switch (CGAL::bounded_side_2(polygon.begin(),polygon.end(), pt, K())) \
 	{
 	case CGAL::ON_BOUNDED_SIDE:
 		return true;//点在polygon内部
@@ -207,15 +271,10 @@ int Operation::check2PolygonRelation(vector<Point_2> modelPolygon, vector<Point_
 }
 
 
-void Operation::classifyPolygons(vector<point2D> modelPolygon, vector<vector<point2D>> texturePolygons)
+void Operation::classifyPolygons(vector<point2D> modelPolygon, polyPosition &polygons, vector<vector<point2D>> texturePolygons)
 {
 	vector<Point_2> modelpoly;
 	vector<vector<Point_2>> texturePolys;
-
-	vector<vector<Point_2>> intersectPolys;
-	vector<vector<Point_2>> outsidePolys;
-	vector<vector<Point_2>> insidePolys;
-
 
 	//1.对输入数据转化为cgal的格式
 	convert2CGALpoint(modelPolygon, modelpoly);
@@ -228,15 +287,15 @@ void Operation::classifyPolygons(vector<point2D> modelPolygon, vector<vector<poi
 		{
 		case 1:
 			//相交
-			intersectPolys.push_back(texturePolys.at(i));
+			polygons.intersectPolys.push_back(texturePolys.at(i));
 			break;
 		case 2:
 			//texture在model内部
-			insidePolys.push_back(texturePolys.at(i));
+			polygons.insidePolys.push_back(texturePolys.at(i));
 			break;
 		case 3:
 			//texture在model外部
-			outsidePolys.push_back(texturePolys.at(i));
+			polygons.outsidePolys.push_back(texturePolys.at(i));
 			break;
 		default:
 			break;
@@ -245,7 +304,7 @@ void Operation::classifyPolygons(vector<point2D> modelPolygon, vector<vector<poi
 }
 
 //执行pA - pB操作,确保pA,pB都是逆时针存储的
-void Operation::doDiffOperate(vector<Point_2> pA, vector<Point_2> pB)
+void Operation::doDiffOperate(vector<Point_2> &pA, vector<Point_2> pB)
 {
 	Polygon_2 PolygonA, polygonB;
 
@@ -261,14 +320,37 @@ void Operation::doDiffOperate(vector<Point_2> pA, vector<Point_2> pB)
 
 	Pwh_list_2 symmR;
 	Pwh_list_2::const_iterator it;
+	Polygon_2 outerPoly;
 	CGAL::difference(PolygonA, polygonB, std::back_inserter(symmR));
 	it = symmR.begin();
+	//用于选择最合适的轮廓
 	if (symmR.size()>1)
 	{
 		cout << "wrong boolean operation!" << endl;
+		outerPoly = it->outer_boundary();
+		auto tmpArea = outerPoly.area();
+		cout << tmpArea << endl;
+		for (it = symmR.begin();it != symmR.end(); ++it)
+		{
+			
+			if (it->outer_boundary().area() > tmpArea)
+			{
+				outerPoly = it->outer_boundary();
+				cout << outerPoly.area()<<endl;
+				break;
+			}
+		}
 	}
-	for (it = symmR.begin(); it != symmR.end(); it++)
+	else
 	{
-		Polygon_2 outerPoly = it->outer_boundary();
+		it = symmR.begin();
+		outerPoly = it->outer_boundary();
 	}
+	//更新pA
+	vector<Point_2> tmpPolygon;
+	for (Polygon_2::Vertex_const_iterator vit = outerPoly.vertices_begin(); vit != outerPoly.vertices_end(); ++vit)
+	{
+		tmpPolygon.push_back(*vit);
+	}
+	pA = tmpPolygon;
 }

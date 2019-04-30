@@ -20,7 +20,7 @@ SolidTexture::~SolidTexture()
 //5.根据轮廓C与模型轮廓G(wall-inner)的关系将C分类,对于在C在G外部的,舍去
 //6.对于C与G相交的,执行G-C
 //7.对于C在G内部的,执行多边形扫描转换
-void SolidTexture::generateNewGcode(Gcode & currGcode)
+void SolidTexture::generateNewGcode(Gcode & currGcode,Gcode &newGcode)
 {
 	MarchingSquares Ms;
 	vector<point2D> texturePoints;
@@ -31,10 +31,23 @@ void SolidTexture::generateNewGcode(Gcode & currGcode)
 	vector<vector<int>> ConnectedComponent;//点的索引构成的轮廓数组
 	vector<vector<point2D>> coord;//点实际坐标构成的轮廓数组
 
-	//对currGcode中wallouter部分进行处理
-	for (int i = 0; i < currGcode.mainBody.size(); i++)
+	//得到模型内轮廓对应的多边形,并保证是逆时针存储
+	vector<vector<vector<point2D>>> modelPolygon;
+	currGcode.prepareModelPolygon(currGcode, modelPolygon);
+	for (int i = 0; i < modelPolygon.size(); i++)
+	{
+		adjustContourCCW(modelPolygon.at(i));
+	}
+
+	newGcode.startGcode = currGcode.startGcode;
+	newGcode.endGcode = currGcode.endGcode;
+
+	//对currGcode中wallinner部分进行处理
+	for (int i = 0; i < modelPolygon.size(); i++)
 	{
 		cout << "layer " << i << endl;
+		//生成新的Gcode
+		LayerInfo newlayer;
 
 		//对于每一层先用marchingsquares算法从texture field中得到线段保存在texturePoints中
 		//int textureIdx = i / 10;//使得每10层对应于field中的每一层
@@ -42,7 +55,7 @@ void SolidTexture::generateNewGcode(Gcode & currGcode)
 
 		Ms.createMarchingSquares(textureField.at(textureIdx), texturePoints);
 
-		//
+		//建立点的
 		getPointsDictionary(texturePoints, pointDict, pointIndex);
 		getPointIdxEachLine(pointIndex, line);
 		getlineByPoint(line, pointNeighbor);
@@ -54,49 +67,242 @@ void SolidTexture::generateNewGcode(Gcode & currGcode)
 		//保证轮廓是逆时针存储
 		adjustContourCCW(coord);
 
-		for (int j = 0; j < currGcode.mainBody.at(i).contourContainer.size(); j++)
+		Operation operation;
+		
+		//逐个轮廓判断位置关系
+		for (int j = 0; j < modelPolygon.at(i).size(); j++)
 		{
-			for (int k = 0; k < currGcode.mainBody.at(i).contourContainer.at(j).wallOuterContainer.size(); k++)
+			//gcode轮廓
+			contour newContour;
+			
+			//polyPosition是与给定的模型轮廓相关的
+			polyPosition polygons;
+
+			vector<point2D> oneModelPolygon = modelPolygon.at(i).at(j);
+			operation.classifyPolygons(oneModelPolygon,polygons,coord);
+			vector<Point_2> copy_oneModelPolygon;//要保留的模型轮廓！！
+			operation.convert2CGALpoint(oneModelPolygon, copy_oneModelPolygon);
+
+			//检查是不是简单多边形
+			vector<vector<Point_2>> acturalintersectPolys;
+			for (int idx = 0; idx < polygons.intersectPolys.size(); idx++)
 			{
-				eachLine tmpline = currGcode.mainBody.at(i).contourContainer.at(j).wallOuterContainer.at(k);
-
-				if (tmpline.isGcommand
-					&& tmpline.GcommandLine.Gcommand == "G1"
-					&& tmpline.codetype == WALL_OUTER
-					&& tmpline.GcommandLine.X.isValidValue
-					&& tmpline.GcommandLine.Y.isValidValue
-					&& tmpline.GcommandLine.E.isValidValue)
+				Polygon_2 testPolygon;
+				for (int idxx = 0;idxx < polygons.intersectPolys.at(idx).size();idxx++)
 				{
-					tmpPoint.x = tmpline.GcommandLine.X.value;
-					tmpPoint.y = tmpline.GcommandLine.Y.value;
-
-					//在TextureGcode中获取距离当前点距离最近的点
-					newPoint = getClosestPoint(texturePoints, tmpPoint);
-
-					float tmpDist = getLength(tmpPoint, newPoint);
-					//cout << tmpDist << endl;
-
-					if (tmpDist < offsetDist_upperBound)
-					{
-						//将当前点移动到新的位置
-						currGcode.mainBody.at(i).contourContainer.at(j).wallOuterContainer.at(k).GcommandLine.X.value = newPoint.x;
-						currGcode.mainBody.at(i).contourContainer.at(j).wallOuterContainer.at(k).GcommandLine.Y.value = newPoint.y;
-					}
-					else if (tmpDist >= offsetDist_upperBound)
-					{
-						//计算将点沿方向，移动到upper bound之后对应的点
-						insertPoint(offsetDist_upperBound, tmpPoint, newPoint, addPoint);
-						//cout << "move to upper bound" << endl;
-						//将点沿方向，移动到upperbound
-						currGcode.mainBody.at(i).contourContainer.at(j).wallOuterContainer.at(k).GcommandLine.X.value = addPoint.x;
-						currGcode.mainBody.at(i).contourContainer.at(j).wallOuterContainer.at(k).GcommandLine.Y.value = addPoint.y;
-					}
+					testPolygon.push_back(polygons.intersectPolys.at(idx).at(idxx));
+				}
+				if (testPolygon.is_simple())
+					acturalintersectPolys.push_back(polygons.intersectPolys.at(idx));
+				else
+				{
+					cout << "non-manifold polygon!" << endl;
 				}
 			}
+
+			//对于相交的做difference
+			for (int k = 0; k <acturalintersectPolys.size(); k++)
+			{
+				operation.doDiffOperate(copy_oneModelPolygon, acturalintersectPolys.at(k));
+			}
+
+			//在modelPolygon内部的texture polygons
+			vector<vector<point2D>> insidePolys;
+
+			//数据类型转化
+			oneModelPolygon.clear();//先将数组清空，再作为转化后的输入
+			operation.convertPoint_2Topoint2D(copy_oneModelPolygon, oneModelPolygon);
+			operation.convertPoint_2Topoint2D(polygons.insidePolys, insidePolys);
+
+			vector<vector<point2D>> intersectPoint;//保存扫描线与边界的交点
+
+			//对于在内部的做扫描转换
+			fillPoly(oneModelPolygon, insidePolys, intersectPoint);
+
+			//将计算得到的交点按x递增排序
+			for (int tmpidx = 0; tmpidx < intersectPoint.size(); tmpidx++)
+			{
+				sort(intersectPoint.at(tmpidx).begin(), intersectPoint.at(tmpidx).end());
+			}
+
+			vector<eachLine> newWallinner;
+			vector<eachLine> contourGcode;
+			vector<eachLine> inFillGcode;
+
+			//将轮廓线转化为Gcode
+			operation.convertContour2Gcode(oneModelPolygon, newWallinner);
+
+			//将内部填充线转化为Gcode
+			operation.convertContour2Gcode(insidePolys,contourGcode);
+
+			//将内部填充线转化为gcode表达
+			operation.convertInfillLine2Gcode(intersectPoint, inFillGcode);
+
+			//将newWallinner与contourGcode合并
+			newWallinner.insert(newWallinner.end(), contourGcode.begin(), contourGcode.end());
+			newContour.wallInnerContainer = newWallinner;
+			newContour.typeSequence.push_back(WALL_INNER);
+			newContour.fillContainer = inFillGcode;
+			newContour.typeSequence.push_back(FILL);
+
+			//存入layercontainer中
+			newlayer.contourContainer.push_back(newContour);
 		}
-		//清理变量，准备新的一层
+		newGcode.mainBody.push_back(newlayer);
+
+		//清理变量
 		texturePoints.clear();
+		pointDict.clear();
+		pointIndex.clear();
+		line.clear();//每条边对应的顶点数组
+		pointNeighbor.clear();
+		ConnectedComponent.clear();//点的索引构成的轮廓数组
+		coord.clear();//点实际坐标构成的轮廓数组
 	}
+
+}
+
+void SolidTexture::generateNewGcodeTPMS(Gcode & currGcode, Gcode & newGcode)
+{
+
+	MarchingSquares Ms;
+	vector<point2D> texturePoints;
+	vector<point2D> pointDict;
+	vector<int> pointIndex;
+	vector<Line> line;//每条边对应的顶点数组
+	map<int, vector<int>> pointNeighbor;
+	vector<vector<int>> ConnectedComponent;//点的索引构成的轮廓数组
+	vector<vector<point2D>> coord;//点实际坐标构成的轮廓数组
+
+	//得到模型内轮廓对应的多边形,并保证是逆时针存储
+	vector<vector<vector<point2D>>> modelPolygon;
+	currGcode.prepareModelPolygon(currGcode, modelPolygon);
+	for (int i = 0; i < modelPolygon.size(); i++)
+	{
+		adjustContourCCW(modelPolygon.at(i));
+	}
+
+	newGcode.startGcode = currGcode.startGcode;
+	newGcode.endGcode = currGcode.endGcode;
+
+	//对currGcode中wallinner部分进行处理
+	for (int i = 0; i < modelPolygon.size(); i++)
+	{
+		cout << "layer " << i << endl;
+		//生成新的Gcode
+		LayerInfo newlayer;
+
+		//对于每一层先用marchingsquares算法从texture field中得到线段保存在texturePoints中
+		//int textureIdx = i / 10;//使得每10层对应于field中的每一层
+		int textureIdx = i;
+
+		Ms.createMarchingSquares(tpmsField.at(textureIdx), texturePoints);
+
+		//建立点的
+		getPointsDictionary(texturePoints, pointDict, pointIndex);
+		getPointIdxEachLine(pointIndex, line);
+		getlineByPoint(line, pointNeighbor);
+
+		//得到连通分支
+		constructConnectedComponent(pointNeighbor, ConnectedComponent);
+		getRealConnectComponent(ConnectedComponent, pointDict, coord);
+
+		//保证轮廓是逆时针存储
+		adjustContourCCW(coord);
+
+		Operation operation;
+
+		//逐个轮廓判断位置关系
+		for (int j = 0; j < modelPolygon.at(i).size(); j++)
+		{
+			//gcode轮廓
+			contour newContour;
+
+			//polyPosition是与给定的模型轮廓相关的
+			polyPosition polygons;
+
+			vector<point2D> oneModelPolygon = modelPolygon.at(i).at(j);
+			operation.classifyPolygons(oneModelPolygon, polygons, coord);
+			vector<Point_2> copy_oneModelPolygon;//要保留的模型轮廓！！
+			operation.convert2CGALpoint(oneModelPolygon, copy_oneModelPolygon);
+
+			//检查是不是简单多边形
+			vector<vector<Point_2>> acturalintersectPolys;
+			for (int idx = 0; idx < polygons.intersectPolys.size(); idx++)
+			{
+				Polygon_2 testPolygon;
+				for (int idxx = 0; idxx < polygons.intersectPolys.at(idx).size(); idxx++)
+				{
+					testPolygon.push_back(polygons.intersectPolys.at(idx).at(idxx));
+				}
+				if (testPolygon.is_simple())
+					acturalintersectPolys.push_back(polygons.intersectPolys.at(idx));
+				else
+				{
+					cout << "non-manifold polygon!" << endl;
+				}
+			}
+
+			//对于相交的做difference
+			for (int k = 0; k <acturalintersectPolys.size(); k++)
+			{
+				operation.doDiffOperate(copy_oneModelPolygon, acturalintersectPolys.at(k));
+			}
+
+			//在modelPolygon内部的texture polygons
+			vector<vector<point2D>> insidePolys;
+
+			//数据类型转化
+			oneModelPolygon.clear();//先将数组清空，再作为转化后的输入
+			operation.convertPoint_2Topoint2D(copy_oneModelPolygon, oneModelPolygon);
+			operation.convertPoint_2Topoint2D(polygons.insidePolys, insidePolys);
+
+			vector<vector<point2D>> intersectPoint;//保存扫描线与边界的交点
+
+			//对于在内部的做扫描转换
+			fillPoly(oneModelPolygon, insidePolys, intersectPoint);
+
+			//将计算得到的交点按x递增排序
+			for (int tmpidx = 0; tmpidx < intersectPoint.size(); tmpidx++)
+			{
+				sort(intersectPoint.at(tmpidx).begin(), intersectPoint.at(tmpidx).end());
+			}
+
+			vector<eachLine> newWallinner;
+			vector<eachLine> contourGcode;
+			vector<eachLine> inFillGcode;
+
+			//将轮廓线转化为Gcode
+			operation.convertContour2Gcode(oneModelPolygon, newWallinner);
+
+			//将内部填充线转化为Gcode
+			operation.convertContour2Gcode(insidePolys, contourGcode);
+
+			//将内部填充线转化为gcode表达
+			operation.convertInfillLine2Gcode(intersectPoint, inFillGcode);
+
+			//将newWallinner与contourGcode合并
+			newWallinner.insert(newWallinner.end(), contourGcode.begin(), contourGcode.end());
+			newContour.wallInnerContainer = newWallinner;
+			newContour.typeSequence.push_back(WALL_INNER);
+			newContour.fillContainer = inFillGcode;
+			newContour.typeSequence.push_back(FILL);
+
+			//存入layercontainer中
+			newlayer.contourContainer.push_back(newContour);
+		}
+		newGcode.mainBody.push_back(newlayer);
+
+		//清理变量
+		texturePoints.clear();
+		pointDict.clear();
+		pointIndex.clear();
+		line.clear();//每条边对应的顶点数组
+		pointNeighbor.clear();
+		ConnectedComponent.clear();//点的索引构成的轮廓数组
+		coord.clear();//点实际坐标构成的轮廓数组
+	}
+
 }
 
 void SolidTexture::densifyGcode(Gcode & currGcode)
@@ -261,14 +467,25 @@ void SolidTexture::getPointsDictionary(vector<point2D> inTexturePoints, vector<p
 void SolidTexture::getPointIdxEachLine(vector<int> inPointIndex, vector<Line>& outLine)
 {
 	Line tmpline;
-	for (int i = 0; i < inPointIndex.size(); i + 2)
+	int j;
+	for (int i = 0; i < inPointIndex.size()-1; i+=2)
 	{
 		tmpline.p1 = inPointIndex.at(i);
-		tmpline.p2 = inPointIndex.at(i + 1);
-		outLine.push_back(tmpline);
+		j = i + 1;
+		tmpline.p2 = inPointIndex.at(j);
+		//如果一条线段，起点与终点相同，不计入这条线段
+		//if (inPointIndex.at(i) == inPointIndex.at(j))
+		//{
+		//	continue;
+		//}
+		//else
+		//{
+		outLine.push_back(tmpline);//起点终点相同的线段暂时计入，在构建连通分量时再删去
+		//}
 	}
 }
 
+//返回的pointneighbor，记录了每个顶点有哪些相邻的顶点
 void SolidTexture::getlineByPoint(vector<Line> inLine, map<int, vector<int>> &pointNeighbor)
 {
 	int pointIndex1, pointIndex2;
@@ -291,29 +508,48 @@ void SolidTexture::constructConnectedComponent(map<int, vector<int>> pointNeighb
 	int startPointIdx;
 	int nextPointIdx;
 
-	while (unVisitedSize != 0)
+	while (unVisitedSize > 0)
 	{
 		vector<int> tmpComponent;
 
 		if (isNewConnectedComponent)
 		{
-			for (int i = isVisited.size() - 1; i >0; i--)
+			//如果当前还有点未遍历，且新开始一个连通分量
+			//从标记为未遍历的点开始
+			for (int i = 0; i < isVisited.size(); i++)
 			{
-				//对于每一个起点，加入连通分支，标记为已访问，未访问点数减一
-				startPointIdx = i;
-				tmpComponent.push_back(startPointIdx);
-				isVisited.at(startPointIdx) = true;
-				unVisitedSize--;
-				isNewConnectedComponent = false;
+				if (isVisited.at(i) == false)
+				{
+					//对于每一个起点，加入连通分支，标记为已访问，未访问点数减一
+					cout << i << endl;
+					startPointIdx = i;
+					tmpComponent.push_back(startPointIdx);
+					if (startPointIdx >= isVisited.size())
+					{
+						cout << "startindex" << startPointIdx << "out of range!" << endl;
+					}
+					isVisited.at(startPointIdx) = true;
+					unVisitedSize--;
+					isNewConnectedComponent = false;
+					break;
+				}
 			}
 		}
 
 		//当前点包含哪些邻居
+		map<int, vector<int>>::iterator it = pointNeighbor.find(startPointIdx);
+		if (it == pointNeighbor.end())
+		{
+			cout << "element" << startPointIdx << "don't exitst!" << endl;
+			isNewConnectedComponent = true;
+			continue;
+		}
 		vector<int> currPointNeighbor = pointNeighbor.find(startPointIdx)->second;
 		if (currPointNeighbor.size() > 2)
 		{
 			//用于debug
 			cout << "Error! Vertex has more than 2 neighors!!" << endl;
+			
 		}
 
 		//从一个点出发，直到回到该点,得到一个连通分支
@@ -327,7 +563,12 @@ void SolidTexture::constructConnectedComponent(map<int, vector<int>> pointNeighb
 				if (isVisited.at(tmpIdx) == false)
 				{
 					nextPointIdx = tmpIdx;
+					if (nextPointIdx >= isVisited.size())
+					{
+						cout << "visit" << nextPointIdx <<"out of range!"<< endl;
+					}
 					isVisited.at(nextPointIdx) = true;
+					unVisitedSize--;
 					tmpComponent.push_back(nextPointIdx);
 					break;
 				}
@@ -421,6 +662,9 @@ void SolidTexture::ConstructNewEdgeTable(float yMin, float yMax, vector<vector<N
 	point2D p1, p2;
 	NewEdgeTable node;
 
+	//暂时不考虑外轮廓
+	//modelPolygon.clear();
+
 	//相邻两点构成一条边
 	//找到各边的最小y值，确定该边在net中的那个位置出现
 	for (int i = 0; i < modelPolygon.size(); i++)
@@ -441,15 +685,17 @@ void SolidTexture::ConstructNewEdgeTable(float yMin, float yMax, vector<vector<N
 		{
 			tmpy = p1.y;
 			node.xMin = p1.x;
+			node.yMin = p1.y;
 			node.yMax = p2.y;
 		}
 		else
 		{
 			tmpy = p2.y;
 			node.xMin = p2.x;
+			node.yMin = p2.y;
 			node.yMax = p1.y;
 		}
-		node.invSlope = (p2.y - p1.y) / (p2.x - p1.x);
+		node.invSlope = (p2.x - p1.x) / (p2.y - p1.y);
 		//得到当前线段的最低点y
 		tmpy = p1.y < p2.y ? p1.y : p2.y;
 
@@ -466,7 +712,7 @@ void SolidTexture::ConstructNewEdgeTable(float yMin, float yMax, vector<vector<N
 		{
 			p1 = texturePolygon.at(i).at(j);
 
-			if (i == texturePolygon.at(i).size() - 1)
+			if (j == texturePolygon.at(i).size() - 1)
 			{
 				//最后一个点的特殊处理
 				p2 = texturePolygon.at(i).at(0);
@@ -480,15 +726,17 @@ void SolidTexture::ConstructNewEdgeTable(float yMin, float yMax, vector<vector<N
 			{
 				tmpy = p1.y;
 				node.xMin = p1.x;
+				node.yMin = p1.y;
 				node.yMax = p2.y;
 			}
 			else
 			{
 				tmpy = p2.y;
 				node.xMin = p2.x;
+				node.yMin = p2.y;
 				node.yMax = p1.y;
 			}
-			node.invSlope = (p2.y - p1.y) / (p2.x - p1.x);
+			node.invSlope = (p2.x - p1.x) / (p2.y - p1.y);
 			//得到当前线段的最低点y
 			tmpy = p1.y < p2.y ? p1.y : p2.y;
 
@@ -500,7 +748,28 @@ void SolidTexture::ConstructNewEdgeTable(float yMin, float yMax, vector<vector<N
 	}
 }
 
-void SolidTexture::fillPoly(vector<point2D> modelPolygon, vector<vector<point2D>> texturePolygon)
+bool SolidTexture::isEdgeInAET(vector<ActiveEdgeTable> aet, NewEdgeTable newEdge)
+{
+	if (aet.size() == 0)
+	{
+		return false;
+	}
+
+	for (int i = 0; i < aet.size(); i++)
+	{
+		ActiveEdgeTable tmpAet = aet.at(i);
+		if (fabs(newEdge.xMin - tmpAet.x) <10e-5
+			&&fabs(newEdge.yMax - tmpAet.yMax)<10e-5)
+		{
+			//如果有的话就return ture了
+			return true;
+		}
+	}
+	//如果前面没有return，那么只能在这return false
+	return false;
+}
+
+void SolidTexture::fillPoly(vector<point2D> modelPolygon, vector<vector<point2D>> texturePolygon, vector<vector<point2D>> &intersectPoint)
 {
 	//1.找到y的最大最小值
 	//这里的texturePolygon是确保在modelPolygon内部的
@@ -521,7 +790,8 @@ void SolidTexture::fillPoly(vector<point2D> modelPolygon, vector<vector<point2D>
 	}
 
 	//2.计算扫描线条数，构建新边表
-	int scanLineNum = (yMax - yMin) / scanLineGap;
+	//由于除后截断取整，应当加1，保证都被包含
+	int scanLineNum =1 + (yMax - yMin) / scanLineGap;
 
 	//新边表对应的数据结构是：当前扫描线有哪些边新加入活性边
 	vector<vector<NewEdgeTable>> net(scanLineNum);
@@ -532,8 +802,6 @@ void SolidTexture::fillPoly(vector<point2D> modelPolygon, vector<vector<point2D>
 	vector<ActiveEdgeTable> aet, aet2;
 
 	//4.依次处理各扫描线
-	vector<vector<point2D>> intersectPoint;//保存扫描线与边界的交点
-
 	for (int i = 0; i < scanLineNum; i++)
 	{
 		vector<point2D> tmpIntersectPoint;
@@ -551,8 +819,9 @@ void SolidTexture::fillPoly(vector<point2D> modelPolygon, vector<vector<point2D>
 
 		}
 		aet = aet2;//更新活性边表
+		aet2.clear();
 
-				   //2.如果不去除，更新x值
+		//2.如果不去除，更新x值
 		for (int j = 0; j < aet.size(); j++)
 		{
 			aet.at(j).x += aet.at(j).dletaX*scanLineGap;
@@ -573,13 +842,65 @@ void SolidTexture::fillPoly(vector<point2D> modelPolygon, vector<vector<point2D>
 			for (int j = 0; j < net.at(i).size(); j++)
 			{
 				newEdge = net.at(i).at(j);
-				node.x = newEdge.xMin;
-				node.dletaX = newEdge.invSlope;
-				node.yMax = newEdge.yMax;
-
-				aet.push_back(node);
+				//判断当前边是否已在活性边数组中
+				if (isEdgeInAET(aet,newEdge))
+				{
+					continue;
+				}
+				else
+				{
+					node.x = newEdge.xMin;
+					node.dletaX = newEdge.invSlope;
+					node.yMax = newEdge.yMax;
+					node.yMin = newEdge.yMin;
+					aet2.push_back(node);
+				}
 			}
 		}
+		//4.计算新加入的边与扫描线的交点
+		for (int j = 0; j < aet2.size(); j++)
+		{
+			aet2.at(j).x =aet2.at(j).x + aet2.at(j).dletaX*(tmpy-aet2.at(j).yMin);
+			point2D tmpPoint;
+			tmpPoint.x = aet2.at(j).x;
+			tmpPoint.y = yMin + i*scanLineGap;
+
+			tmpIntersectPoint.push_back(tmpPoint);
+		}
+		aet.insert(aet.end(), aet2.begin(), aet2.end());//将新加入的边存入aet
+		aet2.clear();
 	}
+}
+
+void SolidTexture::generateTPMSfield()
+{
+	int voxelRes = 200;
+	double xmin = 95, ymin = 70, zmin = 0;
+	float gap = 0.25;
+	double x, y, z;
+	double tmpF;
+
+	vector<double> tmpTPMSfield;
+
+	for (int i = 0; i < voxelRes; i++)
+	{
+		for (int j = 0; j < voxelRes; j++)
+		{
+			for (int k = 0; k < voxelRes; k++)
+			{
+				x = xmin + i*gap;
+				y = ymin + j*gap;
+				z = zmin + k*gap;
+
+				tmpF = 10 * (cos(x)*sin(y) + cos(y)*sin(z) + cos(z)*sin(x))
+					- 0.5*(cos(2*x)*cos(2*y) + cos(2*y)*cos(2*z) + cos(2*z)*cos(2*z))
+					- 12;
+				tmpTPMSfield.push_back(tmpF);
+			}
+		}
+		tpmsField.push_back(tmpTPMSfield);
+		tmpTPMSfield.clear();
+	}
+
 }
 

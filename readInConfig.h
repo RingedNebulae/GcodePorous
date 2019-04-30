@@ -76,6 +76,20 @@ int readInConfigure()
 			inputTextureField = inputbuffer;
 			cout << "Input Texture name is: " << inputTextureField << endl;
 		}
+		//UNITE是单位长度对应的E
+		else if (inputbuffer == "UNITE")
+		{
+			in.getline(buffer, 100);
+			inputbuffer = buffer;
+			unitE = stof(inputbuffer);
+		}
+		//SCANLINE_GAP是扫描线间距
+		else if (inputbuffer == "SCANLINE_GAP")
+		{
+			in.getline(buffer, 100);
+			inputbuffer = buffer;
+			scanLineGap = stof(inputbuffer);
+		}
 	}
 }
 

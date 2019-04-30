@@ -361,6 +361,8 @@ bool Gcode::outputGcode(string fileName)
 	//输出gcode主体
 	for (int i = 0; i < mainBody.size(); i++)
 	{
+		out << "Layer:" << i << endl;
+		out << "G0 Z" << zValue.at(i) << endl;
 		LayerInfo tmpLayer = mainBody.at(i);
 		//输出当前层的其他指令
 		for (int j = 0; j < tmpLayer.lineContainer.size(); j++)
@@ -462,10 +464,19 @@ void Gcode::outputLine(eachLine tmpline, ofstream &out)
 	else if (tmpline.isGcommand)
 	{
 		out << tmpline.GcommandLine.Gcommand << " ";
+
 		if (tmpline.GcommandLine.feedRate != -1)
 		{
 			out << "F" << tmpline.GcommandLine.feedRate << " ";
 		}
+		else
+		{
+			if (tmpline.GcommandLine.Gcommand == "G0")
+				out << "F" << "4800 ";
+			else if (tmpline.GcommandLine.Gcommand == "G1")
+				out << "F" << "1200 ";
+		}
+
 		if (tmpline.GcommandLine.X.isValidValue)
 		{
 			out << "X" << tmpline.GcommandLine.X.value << " ";
@@ -1251,6 +1262,43 @@ void Gcode::prepareOuterLines(Gcode currGcode, vector<vector<point3D>>& outputPo
 	}
 }
 
+void Gcode::prepareModelPolygon(Gcode currGcode, vector<vector<vector<point2D>>>& modelPolygon)
+{
+	point2D tmpPoint;
+	vector<point2D> contourPoints;
+	vector<vector<point2D>> layerContours;
+
+	for (int i = 0; i < currGcode.mainBody.size(); i++)
+	{
+		LayerInfo tmplayer = mainBody.at(i);
+		for (int j = 0; j < tmplayer.contourContainer.size(); j++)
+		{
+			contour tmpContour = tmplayer.contourContainer.at(j);
+			for (int k = 0; k < tmpContour.wallInnerContainer.size(); k++)
+			{
+				eachLine tmpLine = tmpContour.wallInnerContainer.at(k);
+				if (tmpLine.isGcommand == true
+					&& tmpLine.GcommandLine.Gcommand == "G1"
+					&& tmpLine.GcommandLine.X.isValidValue == true
+					&& tmpLine.GcommandLine.Y.isValidValue == true
+					&& tmpLine.GcommandLine.E.isValidValue == true)
+				{
+					tmpPoint.x = tmpLine.GcommandLine.X.value;
+					tmpPoint.y = tmpLine.GcommandLine.Y.value;
+
+					contourPoints.push_back(tmpPoint);
+				}
+			}
+			//每处理完一个轮廓，将该轮廓包含的点存入
+			layerContours.push_back(contourPoints);
+			contourPoints.clear();
+		}
+		//处理完一层，将当前层的点存入
+		modelPolygon.push_back(layerContours);
+		layerContours.clear();
+	}
+}
+
 void Gcode::smoothGcodeWallouter(vector<vector<point3D>> &outputPoints)
 {
 	point3D prePoint, currPoint, nextPoint;
@@ -1451,4 +1499,13 @@ void Gcode::outputLineObj2(Gcode currGcode, string fileName)
 		num = num + outputPoints.at(i).size();
 
 	}
+}
+
+void Gcode::generateZvalue(Gcode & tmpGcode)
+{
+	for (int i = 0; i < tmpGcode.mainBody.size(); i++)
+	{
+		tmpGcode.zValue.push_back(i*0.3);
+	}
+	
 }

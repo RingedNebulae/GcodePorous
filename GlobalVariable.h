@@ -12,7 +12,8 @@ extern string outputLinePath;
 extern string inputTextureField;
 
 extern float scanLineGap;
-
+extern float unitE;
+extern float currE;//将E作为一个全局的常量，记录在没有加入当前线段前当前的E值
 
 class GlobalVariable
 {

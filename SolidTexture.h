@@ -23,6 +23,7 @@ struct ActiveEdgeTable
 	float x;//扫描线与表的交点坐标
 	float dletaX;//从当前扫描线到下一条扫描线间x的增量，斜率的倒数
 	float yMax;//该边的最大y值
+	float yMin;//该边的最小y值
 	ActiveEdgeTable *next;//指向下一条边的指针
 };
 
@@ -30,6 +31,7 @@ struct NewEdgeTable
 {
 	float yMax;//该边的最大y值
 	float xMin;//该边较低点的x坐标值
+	float yMin;//该边较低点的y坐标值
 	float invSlope;//斜率的倒数
 	NewEdgeTable *next;//指向下一条边的指针
 };
@@ -41,7 +43,8 @@ public:
 	~SolidTexture();
 
 	//根据texture field更新Gcode
-	void generateNewGcode(Gcode & currGcode);
+	void generateNewGcode(Gcode & currGcode, Gcode &newGcode);
+	void generateNewGcodeTPMS(Gcode & currGcode, Gcode &newGcode);
 
 	//等间距加密采样点
 	void densifyGcode(Gcode &currGcode);
@@ -59,7 +62,8 @@ public:
 	//保存solidtexture的数组
 	//double ***TextureField;
 	vector<vector<double>> textureField;
-	
+	vector<vector<double>> tpmsField;
+
 	//从marching squares输出的线段中得到各个连通的轮廓,
 
 	//判断给定的点是否在dict中，如果在给出index，不在返回-1
@@ -86,8 +90,10 @@ public:
 	//构建NewEdgeTable
 	void ConstructNewEdgeTable(float yMin, float yMax, vector<vector<NewEdgeTable>> &net, vector<point2D> modelPolygon, vector<vector<point2D>> texturePolygon);
 	
+	bool isEdgeInAET(vector<ActiveEdgeTable> aet, NewEdgeTable newEdge);
 
-	void fillPoly(vector<point2D> modelPolygon, vector<vector<point2D>> texturePolygon);
+	void fillPoly(vector<point2D> modelPolygon, vector<vector<point2D>> texturePolygon, vector<vector<point2D>> &intersectPoint);
 	
+	void generateTPMSfield();
 };
 
